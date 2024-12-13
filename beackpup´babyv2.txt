@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from datetime import datetime
+import random
+
+# Define o TOKEN do bot e o ID do grupo
+TOKEN = '7291358061:AAFopjAcYplmbxgI8aIG5mNvVV_p7S3FhEA'
+GROUP_ID = -4611097766
+
+# Lista de IDs dos operadores autorizados
+AUTHORIZED_OPERATORS = [1688230519, 672269422, 585848199]
+
+# Inicializa o aplicativo do bot
+application = ApplicationBuilder().token(TOKEN).build()
+
+user_data = {}
+service_data = {}  # Store service details for further actions
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    keyboard = [
+        [InlineKeyboardButton("Começar Serviço", callback_data='start_service')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Bem-vindo! Clique no botão abaixo para começar o serviço:", reply_markup=reply_markup)
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user_id = query.from_user.id
+    username = query.from_user.username or "Desconhecido"
+
+    await query.answer()
+
+    if query.data == 'start_service':
+        service_keyboard = [
+            [InlineKeyboardButton("Ativação", callback_data='service_activation')],
+            [InlineKeyboardButton("Reinstalação", callback_data='service_reinstallation')],
+            [InlineKeyboardButton("Suporte", callback_data='service_support')],
+            [InlineKeyboardButton("Troca de Equipamento", callback_data='service_replacement')],
+        ]
+        reply_markup = InlineKeyboardMarkup(service_keyboard)
+        await query.message.edit_text(
+            text="Qual o tipo de serviço?",
+            reply_markup=reply_markup
+        )
+
+    elif query.data.startswith('service_'):
+        service_type = query.data.split('_')[1]
+        if service_type == 'activation':
+            questions = [
+                "Qual a cidade?",
+                "Qual o bairro?",
+                "Qual o código de conexão do cliente?",
+                "Qual o PPPoE do cliente?",
+                "Qual a CTO?",
+                "Qual a FO?",
+                "Qual o BK?",
+                "Qual a porta?",
+                "Qual o nível de sinal da caixa?",
+                "Qual o nível de sinal do cliente?",
+                "Qual o SN? (Serial Number)",
+                "A luz PON da ONU está piscando?",
+                "Gostaria de deixar alguma observação?",
+            ]
+        elif service_type == 'replacement':
+            questions = [
+                "Qual a cidade?",
+                "Qual o bairro?",
+                "Qual o motivo da troca de equipamento?",
+                "Qual o código de conexão do cliente?",
+                "Qual o sinal do cliente?",
+                "Qual o SN/PON antiga?",
+                "Qual o SN/PON nova?",
+                "Qual o PPPoE?",
+                "A luz PON da ONU está piscando?",
+                "Gostaria de deixar alguma observação?",
+            ]
+        else:
+            questions = [
+                "Qual a cidade?",
+                "Qual o bairro?",
+                "Qual o código de conexão do cliente?",
+                "Qual a CTO?",
+                "Qual a FO?",
+                "Qual o BK?",
+                "Qual a porta?",
+                "Qual o nível de sinal da caixa?",
+                "Qual o nível de sinal do cliente?",
+                "Qual o SN? (Serial Number)",
+                "A luz PON da ONU está piscando?",
+                "Gostaria de deixar alguma observação?",
+            ]
+
+        user_data[user_id] = {
+            'service_type': service_type.capitalize(),
+            'questions': questions,
+            'answers': [],
+            'group_message_id': None  # To track group message ID
+        }
+        await query.message.edit_text(questions[0])
+
+    elif query.data.startswith('rescue_'):
+        if user_id not in AUTHORIZED_OPERATORS:
+            await query.message.reply_text("Apenas operadores autorizados podem resgatar serviços.")
+            return
+
+        service_id = query.data.split('_')[1]
+        service_info = service_data.get(service_id, {})
+        if not service_info:
+            await query.message.reply_text("Serviço não encontrado ou já foi resgatado.")
+            return
+
+        service_info['status'] = 'rescued'
+        service_info['rescued_by'] = username
+
+        options_keyboard = [
+            [InlineKeyboardButton("Deixar Observação", callback_data=f'comment_{service_id}')],
+            [InlineKeyboardButton("Serviço OK", callback_data=f'ok_{service_id}')],
+        ]
+        reply_markup = InlineKeyboardMarkup(options_keyboard)
+        
+        # Send a new message for the rescue action, preserving the original
+        await context.bot.send_message(
+            chat_id=GROUP_ID,
+            text=f"Serviço Resgatado!\n\n<b>Protocolo:</b> {service_id}\n<b>Resgatado por:</b> @{username}",
+            parse_mode="HTML",
+            reply_markup=reply_markup
+        )
+
+        # Notify the technician
+        technician_id = service_info['technician_id']
+        await context.bot.send_message(
+            chat_id=technician_id,
+            text=f"Seu serviço foi resgatado!\n\n<b>Protocolo:</b> {service_id}\n<b>Por:</b> @{username}",
+            parse_mode="HTML"
+        )
+
+    elif query.data.startswith('comment_'):
+        if user_id not in AUTHORIZED_OPERATORS:
+            await query.message.reply_text("Apenas operadores autorizados podem deixar observações.")
+            return
+
+        service_id = query.data.split('_')[1]
+        service_info = service_data.get(service_id, {})
+        if not service_info:
+            await query.message.reply_text("Serviço não encontrado.")
+            return
+
+        service_info['status'] = 'awaiting_comment'
+        service_info['comment_from'] = user_id
+
+        # Show options for specific issues
+        options_keyboard = [
+            [InlineKeyboardButton("Sinal Alto", callback_data=f'signal_high_{service_id}')],
+            [InlineKeyboardButton("ONU Não Está Batendo", callback_data=f'onu_not_matching_{service_id}')],
+            [InlineKeyboardButton("SN Incorreto", callback_data=f'sn_incorrect_{service_id}')],
+            [InlineKeyboardButton("Alterar VLAN", callback_data=f'change_vlan_{service_id}')],
+        ]
+        reply_markup = InlineKeyboardMarkup(options_keyboard)
+        await query.message.edit_text("Selecione o problema:", reply_markup=reply_markup)
+
+    elif query.data.startswith('signal_high_') or query.data.startswith('onu_not_matching_') or query.data.startswith('sn_incorrect_') or query.data.startswith('change_vlan_'):
+        if user_id not in AUTHORIZED_OPERATORS:
+            await query.message.reply_text("Apenas operadores autorizados podem registrar problemas.")
+            return
+
+        service_id = query.data.split('_')[-1]
+        service_info = service_data.get(service_id, {})
+        if not service_info:
+            await query.message.reply_text("Serviço não encontrado.")
+            return
+
+        # Extract issue type and notify the technician
+        issue_type = query.data.split('_')[0].replace('signal', 'Sinal Alto').replace('onu', 'ONU Não Está Batendo').replace('sn', 'SN Incorreto').replace('change', 'Alterar VLAN')
+        technician_id = service_info['technician_id']
+
+        await context.bot.send_message(
+            chat_id=technician_id,
+            text=f"Observação registrada no serviço:\n\n<b>Protocolo:</b> {service_id}\n<b>Problema:</b> {issue_type}\n<b>Por:</b> @{username}",
+            parse_mode="HTML"
+        )
+
+        options_keyboard = [
+            [InlineKeyboardButton("Deixar Mais Alguma Observação", callback_data=f'comment_{service_id}')],
+            [InlineKeyboardButton("Serviço OK", callback_data=f'ok_{service_id}')],
+        ]
+        reply_markup = InlineKeyboardMarkup(options_keyboard)
+        await query.message.edit_text(
+            text=f"Problema registrado: {issue_type}. Escolha uma das opções:",
+            reply_markup=reply_markup
+        )
+
+    elif query.data.startswith('ok_'):
+        if user_id not in AUTHORIZED_OPERATORS:
+            await query.message.reply_text("Apenas operadores autorizados podem finalizar serviços.")
+            return
+
+        service_id = query.data.split('_')[1]
+        service_info = service_data.pop(service_id, {})
+        if not service_info:
+            await query.message.reply_text("Serviço não encontrado.")
+            return
+
+        # Edit the previous message to finalize the service
+        await query.message.edit_text(
+            f"<b>Serviço finalizado com sucesso!</b>\n\n<b>Protocolo:</b> {service_id}\n<b>Finalizado por:</b> @{username}",
+            parse_mode="HTML"
+        )
+
+        # Notify the technician and add "Iniciar Outro Serviço" button
+        technician_id = service_info['technician_id']
+        restart_button = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Iniciar Outro Serviço", callback_data='start_service')],
+            [InlineKeyboardButton("Preciso de Ajuda", callback_data=f'help_{service_id}')]
+        ])
+        await context.bot.send_message(
+            chat_id=technician_id,
+            text=f"Seu serviço foi finalizado!\n\n<b>Protocolo:</b> {service_id}\n<b>Finalizado por:</b> @{username}\n\nCréditos: https://t.me/JaoaDev",
+            parse_mode="HTML",
+            reply_markup=restart_button
+        )
+
+    elif query.data.startswith('help_'):
+        service_id = query.data.split('_')[1]
+        technician_id = update.callback_query.from_user.id
+
+        await context.bot.send_message(
+            chat_id=GROUP_ID,
+            text=f"<b>Ajuda solicitada!</b>\n\n<b>Técnico:</b> @{query.from_user.username}",
+            parse_mode="HTML"
+        )
+        await context.bot.send_message(
+            chat_id=technician_id,
+            text="Ajuda solicitada! Alguém do NOC entrará em contato em breve."
+        )
+
+async def collect_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.message.from_user.id
+    text = update.message.text.strip()
+
+    if user_id not in user_data:
+        for service_id, service_info in service_data.items():
+            if service_info.get('status') == 'awaiting_comment' and user_id == service_info.get('comment_from'):
+                service_info['comments'] = text
+                service_info['status'] = 'commented'
+
+                # Notify the technician with the comment
+                technician_id = service_info['technician_id']
+                operator_username = update.message.from_user.username or "Desconhecido"
+                await context.bot.send_message(
+                    chat_id=technician_id,
+                    text=f"<b>Comentário no serviço:</b>\n\n<b>Protocolo:</b> {service_id}\n<b>Comentário:</b> {text}\n<b>Por:</b> @{operator_username}",
+                    parse_mode="HTML"
+                )
+
+                await update.message.reply_text("Observação registrada com sucesso!")
+                return
+        return
+
+    user_info = user_data[user_id]
+    questions = user_info['questions']
+    answers = user_info['answers']
+
+    answers.append(text)
+
+    if len(answers) < len(questions):
+        await update.message.reply_text(questions[len(answers)])
+    else:
+        user_info['technician'] = update.message.from_user.username or "Desconhecido"
+        user_info['technician_id'] = update.message.from_user.id
+        user_info['date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        pon_status = answers[-2].lower()
+        if "sim" in pon_status:
+            answers[-2] = f"‼️ {answers[-2].upper()} ‼️"
+
+        service_id = f"{random.randint(1000, 9999)}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+        message_parts = [
+            f"<b>Solicitação de {user_info['service_type']}:</b>",
+            f"<b>Protocolo:</b> {service_id}",
+            f"<b>Cidade:</b> {answers[0]}",
+            f"<b>Bairro:</b> {answers[1]}",
+        ]
+
+        if user_info['service_type'] == 'Troca de Equipamento':
+            message_parts.extend([
+                f"<b>Motivo:</b> {answers[2]}",
+                f"<b>Código de Conexão:</b> {answers[3]}",
+                f"<b>Sinal do Cliente:</b> {answers[4]}",
+                f"<b>SN/PON Antiga:</b> {answers[5]}\n<b>SN/PON Nova:</b> {answers[6]}",
+                f"<b>PPPoE:</b> {answers[7]}",
+                f"<b>Luz PON Piscando:</b> {answers[8]}",
+                f"<b>Observações:</b> {answers[9]}\n",
+            ])
+        else:
+            message_parts.extend([
+                f"<b>Código de Conexão:</b> {answers[2]}",
+                f"<b>CTO:</b> {answers[3]}",
+                f"<b>FO:</b> {answers[4]}",
+                f"<b>BK:</b> {answers[5]}",
+                f"<b>Porta:</b> {answers[6]}",
+                f"<b>Nível de Sinal da Caixa:</b> {answers[7]}",
+                f"<b>Nível de Sinal do Cliente:</b> {answers[8]}",
+                f"<b>SN:</b> {answers[9]}",
+                f"<b>Luz PON Piscando:</b> {answers[-2]}\n",
+                f"<b>Observações:</b> {answers[-1]}\n",
+            ])
+
+        message_parts.append(f"<b>Técnico:</b> @{user_info['technician']}")
+        message_parts.append(f"<b>Data:</b> {user_info['date']}")
+
+        message = "\n".join(message_parts)
+
+        sent_message = await context.bot.send_message(
+            chat_id=GROUP_ID,
+            text=message,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Resgatar", callback_data=f'rescue_{service_id}')]
+            ])
+        )
+
+        # Store group message ID for future reference
+        user_info['group_message_id'] = sent_message.message_id
+
+        service_data[service_id] = {
+            'message': message,
+            'technician_id': user_info['technician_id'],
+            'status': 'pending',
+        }
+
+        # Notify the user that the service has been sent
+        await update.message.reply_text(
+            f"As informações foram enviadas ao grupo NOC com sucesso!\n\n<b>Protocolo:</b> {service_id}"
+        )
+
+        user_data.pop(user_id)
+
+if __name__ == '__main__':
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, collect_data))
+
+    application.run_polling()
